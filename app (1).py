@@ -561,10 +561,6 @@ def comprehensive_search(index, query, df, unique_terms, inverted_index, top_n=1
                 if isinstance(wiki_content, str):
                     content += " " + wiki_content
 
-            query_terms = set(processed_query.lower().split())
-            content_matches = sum(1 for term in query_terms if term in content)
-            topic_matches = sum(1 for term in query_terms if term in topic)
-            
             # Give different weights to different sources
             source_weight = 1.0
             if source == 'Wikipedia':
@@ -573,8 +569,18 @@ def comprehensive_search(index, query, df, unique_terms, inverted_index, top_n=1
                 source_weight = 0.9  # Slightly less
             elif source == 'Google':
                 source_weight = 0.8  # Even less
-                
-            relevance_score = ((content_matches * 0.3) + (topic_matches * 0.7)) * source_weight
+
+            if use_bert and BERT_AVAILABLE:
+                try:
+                    bert_rank_score = 1.0 - (docs_to_filter.index(doc_id) / len(docs_to_filter))
+                except ValueError:
+                    bert_rank_score = 0.0
+                relevance_score = bert_rank_score * source_weight
+            else:
+                query_terms = set(processed_query.lower().split())
+                content_matches = sum(1 for term in query_terms if term in content)
+                topic_matches = sum(1 for term in query_terms if term in topic)
+                relevance_score = ((content_matches * 0.3) + (topic_matches * 0.7)) * source_weight
 
             doc_details.append({
                 'id': doc_id,
@@ -1983,7 +1989,11 @@ def main():
                 google_results = []
                 if "Google" in selected_sources:
                     google_results = google_search(query, max_results=num_results)
-                    selected_sources = [src for src in selected_sources if src != "Google"]
+                    if not google_results:
+                        # Fallback to local indexing if live Custom Search API fails or is unconfigured
+                        pass
+                    else:
+                        selected_sources = [src for src in selected_sources if src != "Google"]
 
                 expanded_query, docs, search_time = comprehensive_search(
                     index, query, df, unique_terms, inverted_index,
@@ -1995,7 +2005,9 @@ def main():
                 seen_descriptions = set()
 
                 for item in google_results:
-                    title_key = item['title'].strip().lower()
+                    title_clean = item['title'].strip().lower()
+                    source_clean = item.get('source', 'Google').strip().lower()
+                    title_key = (title_clean, source_clean)
                     desc_key = item['description'][:100].strip().lower() if 'description' in item else ""
                     if title_key not in seen_titles and (not desc_key or desc_key not in seen_descriptions):
                         results_to_display.append(item)
@@ -2008,12 +2020,12 @@ def main():
                     content = df.iloc[int(doc_id)]['content']
                     if not isinstance(content, str):
                         content = ""
-                    title_key = doc_topic.strip().lower()
+                    doc_source = df.iloc[int(doc_id)]['source']
+                    title_key = (doc_topic.strip().lower(), doc_source.strip().lower())
                     desc_key = content[:100].strip().lower()
 
                     if title_key not in seen_titles and (not desc_key or desc_key not in seen_descriptions):
                         doc_link = df.iloc[int(doc_id)]['link']
-                        doc_source = df.iloc[int(doc_id)]['source']
                         results_to_display.append({
                             'title': doc_topic,
                             'link': doc_link,
