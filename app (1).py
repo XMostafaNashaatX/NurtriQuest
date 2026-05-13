@@ -1070,6 +1070,9 @@ def search_and_evaluate(index, query, df, unique_terms, inverted_index, relevant
     }
 
     if relevant_docs:
+        relevant_set = set(int(doc) for doc in relevant_docs)
+        total_relevant = len(relevant_set)
+
         # Helper to compute standard IR metrics for any arbitrary retrieved set of doc IDs
         def compute_metrics(retrieved_ids, relevant_set, total_relevant, k=10):
             # Limit to the top k results shown
