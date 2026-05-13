@@ -1070,30 +1070,43 @@ def search_and_evaluate(index, query, df, unique_terms, inverted_index, relevant
     }
 
     if relevant_docs:
-        eval_metrics = {}
+        # Helper to compute standard IR metrics for any arbitrary retrieved set of doc IDs
+        def compute_metrics(retrieved_ids, relevant_set, total_relevant, k=10):
+            # Limit to the top k results shown
+            retrieved_k = [int(doc) for doc in retrieved_ids[:k]]
+            retrieved_set_k = set(retrieved_k)
+            intersect = relevant_set.intersection(retrieved_set_k)
+            
+            p = len(intersect) / k if k > 0 else 0
+            r = len(intersect) / total_relevant if total_relevant > 0 else 0
+            f = 2 * (p * r) / (p + r) if (p + r) > 0 else 0
+            
+            # DCG@K
+            dcg_val = 0
+            for i, doc_id in enumerate(retrieved_k):
+                if doc_id in relevant_set:
+                    dcg_val += 1 / np.log2(i + 2)
+            
+            # IDCG@K
+            idcg_val = 0
+            for i in range(min(k, len(relevant_set))):
+                idcg_val += 1 / np.log2(i + 2)
+                
+            ndcg_val = dcg_val / idcg_val if idcg_val > 0 else 0
+            return p, r, f, ndcg_val
 
-        relevant_set = set(int(doc) for doc in relevant_docs)
-        retrieved_set = set(int(doc) for doc in comprehensive_docs)
-        relevant_retrieved = relevant_set.intersection(retrieved_set)
+        # Compute metrics for each retrieval model
+        tfidf_p, tfidf_r, tfidf_f, tfidf_ndcg = compute_metrics(tfidf_docs, relevant_set, total_relevant, k=10)
+        bm25_p, bm25_r, bm25_f, bm25_ndcg = compute_metrics(bm25_docs, relevant_set, total_relevant, k=10)
+        rm3_p, rm3_r, rm3_f, rm3_ndcg = compute_metrics(expanded_docs, relevant_set, total_relevant, k=10)
+        comp_p, comp_r, comp_f, comp_ndcg = compute_metrics(comprehensive_docs, relevant_set, total_relevant, k=10)
 
-        precision = len(relevant_retrieved) / len(retrieved_set) if retrieved_set else 0
-        k = len(retrieved_set)
-        total_relevant = len(relevant_set)
-        recall_at_k = len(relevant_retrieved) / min(k, total_relevant) if min(k, total_relevant) > 0 else 0
-        recall = len(relevant_retrieved) / total_relevant if total_relevant > 0 else 0
-
-        f1 = 2 * (precision * recall_at_k) / (precision + recall_at_k) if (precision + recall_at_k) > 0 else 0
-
-        dcg = 0
-        for i, doc_id in enumerate(comprehensive_docs):
-            if doc_id in relevant_set:
-                dcg += 1 / np.log2(i + 2)
-
-        idcg = 0
-        for i in range(min(k, len(relevant_set))):
-            idcg += 1 / np.log2(i + 2)
-
-        ndcg = dcg / idcg if idcg > 0 else 0
+        precision = comp_p
+        k = len(comprehensive_docs[:10])
+        recall_at_k = comp_r
+        recall = comp_r
+        f1 = comp_f
+        ndcg = comp_ndcg
 
         st.markdown("""
         <h3 style="color: #ffdd57; margin-top: 30px; margin-bottom: 15px;">Evaluation Metrics</h3>
@@ -1107,10 +1120,10 @@ def search_and_evaluate(index, query, df, unique_terms, inverted_index, relevant
             </div>
             <div style="color: #e0e0e0; display: flex; margin-bottom: 5px;">
                 <div style="color: #ffdd57; margin-right: 10px;">Relevant documents found:</div>
-                <div>{len(relevant_retrieved)} of {len(relevant_docs)}</div>
+                <div>{len(relevant_set.intersection(set(int(doc) for doc in comprehensive_docs[:10])))} of {len(relevant_docs)} (in top 10 results)</div>
             </div>
             <div style="color: #e0e0e0; font-size: 0.9em; color: #999;">
-                * Metrics below are calculated based on the top {k} results shown
+                * Summary metrics cards represent our comprehensive retrieval system.
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -1119,24 +1132,41 @@ def search_and_evaluate(index, query, df, unique_terms, inverted_index, relevant
 
         with col1:
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric(label=f"Precision@{k}", value=f"{precision:.2f}")
+            st.metric(label="Precision@10", value=f"{precision:.3f}")
             st.markdown('</div>', unsafe_allow_html=True)
 
         with col2:
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric(label=f"Recall@{k}", value=f"{recall_at_k:.2f}")
-            st.markdown(f'<div style="font-size: 0.8em; color: #999; text-align: center;">Overall: {recall:.2f}</div>', unsafe_allow_html=True)
+            st.metric(label="Recall@10", value=f"{recall_at_k:.3f}")
             st.markdown('</div>', unsafe_allow_html=True)
 
         with col3:
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric(label=f"F1@{k}", value=f"{f1:.2f}")
+            st.metric(label="F1-Score@10", value=f"{f1:.3f}")
             st.markdown('</div>', unsafe_allow_html=True)
 
         with col4:
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric(label=f"NDCG@{k}", value=f"{ndcg:.2f}")
+            st.metric(label="NDCG@10", value=f"{ndcg:.3f}")
             st.markdown('</div>', unsafe_allow_html=True)
+
+        # Comparative algorithms data frame table
+        st.markdown("<h4 style='color: #ffdd57; margin-top: 25px; margin-bottom: 10px;'>Cross-Algorithm Comparison Table (Top 10 Results)</h4>", unsafe_allow_html=True)
+        comparison_df = pd.DataFrame({
+            "Retrieval Model": ["TF-IDF Baseline", "Standard BM25", "BM25 + RM3 Expansion", "Our Comprehensive App"],
+            "Precision@10": [tfidf_p, bm25_p, rm3_p, comp_p],
+            "Recall@10": [tfidf_r, bm25_r, rm3_r, comp_r],
+            "F1-Score@10": [tfidf_f, bm25_f, rm3_f, comp_f],
+            "NDCG@10": [tfidf_ndcg, bm25_ndcg, rm3_ndcg, comp_ndcg]
+        })
+        
+        # Style and render
+        st.dataframe(comparison_df.style.format({
+            "Precision@10": "{:.3f}",
+            "Recall@10": "{:.3f}",
+            "F1-Score@10": "{:.3f}",
+            "NDCG@10": "{:.3f}"
+        }).highlight_max(subset=["Precision@10", "Recall@10", "F1-Score@10", "NDCG@10"], axis=0, color="#125920"))
 
         eval_metrics["precision"] = precision
         eval_metrics["recall"] = recall
