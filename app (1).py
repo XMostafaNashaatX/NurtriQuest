@@ -34,6 +34,7 @@ from email.mime.multipart import MIMEMultipart
 import random
 import string
 import dotenv
+import importlib.util
 from datetime import datetime, timedelta
 
 # Load environment variables from .env file if it exists
@@ -66,7 +67,15 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID", "")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "s-mostafa.abdelhameed@zewailcity.edu.eg")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")  # Default password removed for security
+
+# Admin password with safe default fallback
+_admin_pass = os.getenv("ADMIN_PASSWORD", "")
+if not _admin_pass:
+    ADMIN_PASSWORD = "admin"  # Safe default for easy local testing
+    HAS_CUSTOM_PASSWORD = False
+else:
+    ADMIN_PASSWORD = _admin_pass
+    HAS_CUSTOM_PASSWORD = True
 
 # Email settings
 EMAIL_SENDER = os.getenv("EMAIL_SENDER", "nutriquest.app@gmail.com")
@@ -84,6 +93,19 @@ elif ".env" not in open(".gitignore").read():
 
 # Configure logging
 logging.getLogger("org.terrier").setLevel(logging.ERROR)
+
+# BERT Package Check
+def check_bert_available():
+    try:
+        spec_torch = importlib.util.find_spec("torch")
+        spec_trans = importlib.util.find_spec("transformers")
+        spec_sklearn = importlib.util.find_spec("sklearn")
+        return (spec_torch is not None) and (spec_trans is not None) and (spec_sklearn is not None)
+    except Exception:
+        return False
+
+BERT_AVAILABLE = check_bert_available()
+BERT_ERROR = "" if BERT_AVAILABLE else "Required packages (torch, transformers, scikit-learn) are not installed or have loading issues."
 
 # Admin authentication helpers (simplified to use password)
 def verify_admin_password(password):
@@ -108,40 +130,19 @@ if "inverted_index" not in st.session_state:
 
 # Function to check if environment variables are properly set
 def check_environment_variables():
-    """Check if required environment variables are set and guide the user if not"""
-    missing_vars = []
-    
+    """Verify and advise on optional environment variables without blocking execution"""
     if not OPENROUTER_API_KEY:
-        missing_vars.append("OPENROUTER_API_KEY")
-    
-    if not ADMIN_PASSWORD:
-        missing_vars.append("ADMIN_PASSWORD")
-    
-    if missing_vars:
-        st.error("Missing environment variables detected!")
-        st.warning(f"Please set the following in your .env file: {', '.join(missing_vars)}")
-        
-        with st.expander("How to set up your environment"):
-            st.markdown("""
-            ### Setting up your environment
-            
-            1. Create a file named `.env` in the same directory as this script
-            2. Add the following content to the file:
-            ```
-            OPENROUTER_API_KEY=your_openrouter_api_key
-            ADMIN_PASSWORD=your_admin_password
-            ```
-            3. Replace the values with your actual API key and password
-            4. Restart the application
-            
-            Note: The `.env` file is not shared when you push to GitHub.
-            """)
-        return False
-    return True
+        st.sidebar.info("💡 To use the AI Chatbot, please configure your `OPENROUTER_API_KEY` in the `.env` file, or login as Admin to add it.")
+    if not HAS_CUSTOM_PASSWORD:
+        st.sidebar.warning("⚠️ Using default admin password ('admin'). Configure a secure `ADMIN_PASSWORD` in your `.env` file.")
 
 @st.cache_resource
 def ensure_java():
     """Download and unpack OpenJDK 11 if not already present."""
+    if os.name == 'nt':
+        # On Windows, we assume Java is configured in PATH or globally installed
+        return True
+    
     java_dir = Path.home() / ".java"
     if not java_dir.exists():
         java_dir.mkdir(parents=True)
@@ -154,9 +155,12 @@ def ensure_java():
         with tarfile.open(archive) as tar:
             tar.extractall(java_dir)
     # Locate the unpacked JDK root
-    jdk_root = next(java_dir.glob("jdk-*"))
-    os.environ["JAVA_HOME"] = str(jdk_root)
-    os.environ["PATH"] = f"{jdk_root}/bin:" + os.environ.get("PATH", "")
+    try:
+        jdk_root = next(java_dir.glob("jdk-*"))
+        os.environ["JAVA_HOME"] = str(jdk_root)
+        os.environ["PATH"] = f"{jdk_root}/bin:" + os.environ.get("PATH", "")
+    except Exception:
+        pass
     return True
 
 # Ensure Java is in place before any PyTerrier initialization
@@ -164,13 +168,13 @@ ensure_java()
 
 # Initialize PyTerrier after Java setup
 import pyterrier as pt
-if not pt.java.started():
+if not pt.started():
     pt.init(boot_packages=["com.github.terrierteam:terrier-prf:-SNAPSHOT"])
 
 @st.cache_resource
 def download_nltk_resources():
     nltk.download('punkt')
-    nltk.download('punkt_tab')
+    nltk.download('punkt_tab', quiet=True)
     nltk.download('stopwords')
     nltk.download('words')
 
@@ -322,14 +326,14 @@ def query_expansion_rm3(index, query, df, top_n=10):
                 topic = str(df.iloc[doc_id]['topic'])
                 link = str(df.iloc[doc_id]['link'])
                 
-                # Extract terms from link (e.g., from YouTube search URLs or Google search URLs)
+                # Extract terms from link
                 link_terms = ''
-                if 'youtube.com' in link and 'search_query=' in link:
-                    # Extract search terms from YouTube link
+                if 'youtube.com' in link and 'watch?v=' in link:
+                    link_terms = topic
+                elif 'youtube.com' in link and 'search_query=' in link:
                     search_part = link.split('search_query=')[-1].split('&')[0]
                     link_terms = search_part.replace('+', ' ').replace('%20', ' ')
                 elif 'google.com/search' in link and 'q=' in link:
-                    # Extract search terms from Google link
                     search_part = link.split('q=')[-1].split('&')[0]
                     link_terms = search_part.replace('+', ' ').replace('%20', ' ')
                 
@@ -413,32 +417,103 @@ def extract_keywords_from_link(link):
     """Extract meaningful keywords from YouTube or Google links."""
     try:
         keywords = ""
-        if 'youtube.com' in link and 'search_query=' in link:
-            # Extract search terms from YouTube link
+        if 'youtube.com' in link and 'watch?v=' in link:
+            # Skip extract, return clean tag
+            return "YouTube Direct Video"
+        elif 'youtube.com' in link and 'search_query=' in link:
             search_part = link.split('search_query=')[-1].split('&')[0]
             keywords = search_part.replace('+', ' ').replace('%20', ' ')
         elif 'google.com/search' in link and 'q=' in link:
-            # Extract search terms from Google link
             search_part = link.split('q=')[-1].split('&')[0]
             keywords = search_part.replace('+', ' ').replace('%20', ' ')
         elif 'wikipedia.org/wiki/' in link:
-            # Extract topic from Wikipedia link
             topic = link.split('/wiki/')[-1].replace('_', ' ')
             keywords = topic
         
-        # Clean up keywords
         keywords = re.sub(r'[^a-zA-Z0-9\s]', ' ', keywords)
         keywords = re.sub(r'\s+', ' ', keywords).strip()
         
         if keywords:
             return f"Keywords: {keywords}"
         else:
-            # Fallback to just returning the domain
             domain = link.split('//')[1].split('/')[0]
             return f"Source: {domain}"
     except Exception as e:
-        print(f"Error extracting keywords from link: {e}")
         return ""
+
+@st.cache_resource
+def get_bert_cached():
+    if not BERT_AVAILABLE:
+        raise RuntimeError("BERT is unavailable because packages are not installed.")
+    
+    # Lazily import inside the function to speed up startup
+    import torch
+    from transformers import BertTokenizer, BertModel
+    
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    model = BertModel.from_pretrained('bert-base-uncased')
+    if torch.cuda.is_available():
+        model = model.to('cuda')
+    return tokenizer, model
+
+def bert_re_ranking_st(query, candidate_docs, df):
+    if not BERT_AVAILABLE:
+        return candidate_docs
+    if not candidate_docs:
+        return []
+    try:
+        import torch
+        from sklearn.metrics.pairwise import cosine_similarity
+        
+        tokenizer, model = get_bert_cached()
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        # 1. Encode query
+        query_inputs = tokenizer(query, return_tensors='pt', padding=True, truncation=True, max_length=128).to(device)
+        with torch.no_grad():
+            query_outputs = model(**query_inputs)
+            query_emb = query_outputs.last_hidden_state[:, 0, :].cpu().numpy()
+            
+        # 2. Batch-collect document texts
+        texts = []
+        valid_doc_ids = []
+        for doc_id in candidate_docs:
+            doc_idx = int(doc_id)
+            if doc_idx < len(df):
+                doc_text = df.iloc[doc_idx].get('wiki_content', '')
+                if not isinstance(doc_text, str) or not doc_text.strip():
+                    doc_text = df.iloc[doc_idx].get('content', '')
+                if isinstance(doc_text, str) and doc_text.strip():
+                    texts.append(doc_text[:600])
+                    valid_doc_ids.append(doc_id)
+                    
+        if not texts:
+            return candidate_docs
+            
+        # 3. Batch-encode all documents at once
+        doc_inputs = tokenizer(texts, padding=True, truncation=True, max_length=128, return_tensors='pt').to(device)
+        with torch.no_grad():
+            doc_outputs = model(**doc_inputs)
+            doc_embs = doc_outputs.last_hidden_state[:, 0, :].cpu().numpy()
+            
+        # 4. Compute similarities
+        similarities = cosine_similarity(query_emb, doc_embs)[0]
+        
+        # 5. Sort candidates by similarity descending
+        scored_docs = list(zip(valid_doc_ids, similarities))
+        scored_docs.sort(key=lambda x: x[1], reverse=True)
+        
+        final_ids = [doc_id for doc_id, score in scored_docs]
+        
+        # Append any that were skipped
+        for doc_id in candidate_docs:
+            if doc_id not in final_ids:
+                final_ids.append(doc_id)
+                
+        return final_ids
+    except Exception as e:
+        st.warning(f"BERT semantic ranking error: {e}")
+        return candidate_docs
 
 def comprehensive_search(index, query, df, unique_terms, inverted_index, top_n=10, use_query_expansion=True, use_bert=False, selected_sources=None):
     start_time = time.time()
@@ -460,6 +535,10 @@ def comprehensive_search(index, query, df, unique_terms, inverted_index, top_n=1
     else:
         expanded_query = processed_query
         docs_to_filter = bm25_ranking(index, source_specific_query, top_n=top_n*5)
+
+    if use_bert and BERT_AVAILABLE:
+        st.info("Applying BERT semantic re-ranking...")
+        docs_to_filter = bert_re_ranking_st(processed_query, docs_to_filter, df)
 
     doc_details = []
     for doc_id in docs_to_filter:
@@ -551,81 +630,91 @@ def comprehensive_search(index, query, df, unique_terms, inverted_index, top_n=1
 @st.cache_data
 def load_data():
     try:
-        df = pd.read_csv('bodybuilding_search_results.csv')
-        
-        # Preprocess wiki_content
+        import os
+        needs_augmentation = False
+
+        # 1. Load Wikipedia (Original Source)
+        wiki_df = pd.read_csv('bodybuilding_search_results.csv')
+        wiki_df['source'] = 'Wikipedia'
+        if 'content' not in wiki_df.columns:
+            wiki_df['content'] = wiki_df['wiki_content']
+
+        # 2. Load YouTube Dataset
+        if os.path.exists('youtube_search_results.csv'):
+            print("Loading YouTube dataset from 'youtube_search_results.csv'...")
+            youtube_df = pd.read_csv('youtube_search_results.csv')
+            youtube_df['source'] = 'YouTube'
+            if 'content' not in youtube_df.columns:
+                youtube_df['content'] = youtube_df['wiki_content']
+        else:
+            # Fallback generator
+            print("Generating YouTube dataset programmatically...")
+            needs_augmentation = True
+            youtube_df = wiki_df.copy().head(20)
+            youtube_df['source'] = 'YouTube'
+            youtube_df['link'] = youtube_df['topic'].apply(
+                lambda x: f"https://www.youtube.com/results?search_query={str(x).replace(' ', '+')}"
+            )
+            # Create content
+            youtube_df['content'] = youtube_df.apply(
+                lambda row: f"Video about {row['topic']}. Keywords: {extract_keywords_from_link(row['link'])}", axis=1
+            )
+
+        # 3. Load Google Dataset
+        if os.path.exists('google_search_results.csv'):
+            print("Loading Google Search dataset from 'google_search_results.csv'...")
+            google_df = pd.read_csv('google_search_results.csv')
+            google_df['source'] = 'Google'
+            if 'content' not in google_df.columns:
+                google_df['content'] = google_df['wiki_content']
+        else:
+            # Fallback generator
+            print("Generating Google Search dataset programmatically...")
+            needs_augmentation = True
+            google_df = wiki_df.copy().iloc[20:40]
+            google_df['source'] = 'Google'
+            google_df['link'] = google_df['topic'].apply(
+                lambda x: f"https://www.google.com/search?q={str(x).replace(' ', '+')}"
+            )
+            # Create content
+            google_df['content'] = google_df.apply(
+                lambda row: f"Search result about {row['topic']}. Keywords: {extract_keywords_from_link(row['link'])}", axis=1
+            )
+
+        # 4. Concatenate all 3 distinct datasets into one
+        df = pd.concat([wiki_df, youtube_df, google_df], ignore_index=True)
+
+        # 5. Preprocess wiki_content
         df['processed_wiki'] = df['wiki_content'].apply(preprocess_document)
-        
+
         # Ensure content field exists and is populated for all sources
-        if 'content' not in df.columns:
-            # Create more meaningful content for all sources
-            df['content'] = df.apply(lambda row: 
-                # For Wikipedia, use wiki_content
-                row['wiki_content'] if row['source'] == 'Wikipedia' else 
-                # For YouTube, create enriched content from topic and link
-                (f"Video about {row['topic']}. " + 
-                extract_keywords_from_link(row['link']) if row['source'] == 'YouTube' else
-                # For Google, create enriched content from topic and link
-                f"Search result about {row['topic']}. " + 
-                extract_keywords_from_link(row['link']))
-                , axis=1)
-        
+        df['content'] = df.apply(lambda row: 
+            # For Wikipedia, use wiki_content
+            row['wiki_content'] if row['source'] == 'Wikipedia' else 
+            # For YouTube / Google, if content is already populated and not empty, keep it, otherwise create enriched content
+            (row['content'] if (isinstance(row.get('content'), str) and row['content'].strip()) else
+             (f"Video about {row['topic']}. " + extract_keywords_from_link(row['link']) if row['source'] == 'YouTube' else
+              f"Search result about {row['topic']}. " + extract_keywords_from_link(row['link'])))
+            , axis=1)
+
         # Add a combined content field that integrates all available information
         df['combined_content'] = df.apply(lambda row: 
             f"{row['topic']} {row['source']} {row.get('content', '')} {row.get('wiki_content', '')}", 
             axis=1)
-        
+
         # Process the combined content for searching
         df['processed'] = df['combined_content'].apply(preprocess_document)
 
-        sources_count = df['source'].value_counts()
-        print(f"Dataset sources distribution: {sources_count}")
-
-        needs_augmentation = False
-
-        if 'YouTube' not in df['source'].values or df[df['source'] == 'YouTube'].shape[0] < 10:
-            needs_augmentation = True
-            youtube_entries = df[df['source'] == 'Wikipedia'].copy().head(20)
-            youtube_entries['source'] = 'YouTube'
-            youtube_entries['link'] = youtube_entries['link'].apply(
-                lambda x: f"https://www.youtube.com/results?search_query={x.split('/')[-1].replace('_', '+')}"
-            )
-            # Keep wiki_content but mark it as from YouTube adaptation
-            youtube_entries['content'] = youtube_entries.apply(
-                lambda row: f"Video about {row['topic']}. Keywords: {extract_keywords_from_link(row['link'])}", axis=1
-            )
-            df = pd.concat([df, youtube_entries], ignore_index=True)
-
-        if 'Google' not in df['source'].values or df[df['source'] == 'Google'].shape[0] < 10:
-            needs_augmentation = True
-            google_entries = df[df['source'] == 'Wikipedia'].copy().iloc[20:40]
-            google_entries['source'] = 'Google'
-            google_entries['link'] = google_entries['link'].apply(
-                lambda x: f"https://www.google.com/search?q={x.split('/')[-1].replace('_', '+')}"
-            )
-            # Keep wiki_content but mark it as from Google adaptation
-            google_entries['content'] = google_entries.apply(
-                lambda row: f"Search result about {row['topic']}. Keywords: {extract_keywords_from_link(row['link'])}", axis=1
-            )
-            df = pd.concat([df, google_entries], ignore_index=True)
-
-        # Regenerate combined content after augmentation
-        df['combined_content'] = df.apply(lambda row: 
-            f"{row['topic']} {row['source']} {row.get('content', '')} {row.get('wiki_content', '')}", 
-            axis=1)
-        
-        # Regenerate processed content after augmentation
-        df['processed'] = df['combined_content'].apply(preprocess_document)
-
-        print(f"After augmentation, sources distribution: {df['source'].value_counts()}")
+        print(f"Loaded triple datasets with source distribution: {df['source'].value_counts().to_dict()}")
 
         if needs_augmentation:
             df.to_csv('augmented_dataset.csv', index=False)
-            print("Saved augmented dataset to augmented_dataset.csv")
+            print("Saved augmented dataset copy to augmented_dataset.csv")
 
         return df, needs_augmentation
     except Exception as e:
         st.error(f"Error loading data: {e}")
+        traceback.print_exc()
         return pd.DataFrame(columns=['topic', 'source', 'link', 'wiki_content', 'processed', 'content']), False
 
 @st.cache_resource(show_spinner=False)
@@ -1069,12 +1158,10 @@ def analyze_dataset_for_relevant_docs(df):
     for idx, row in df.iterrows():
         topic = str(row['topic']).lower() if 'topic' in df.columns else ""
         
-        # Look for content in multiple fields
         wiki_content = str(row.get('wiki_content', '')).lower()
         content = str(row.get('content', '')).lower()
         combined_content = str(row.get('combined_content', '')).lower()
         
-        # Use the richest content available
         if combined_content:
             searchable_content = combined_content
         elif content:
@@ -1082,7 +1169,6 @@ def analyze_dataset_for_relevant_docs(df):
         else:
             searchable_content = wiki_content
         
-        # Now search in both topic and the best available content
         if ('protein' in topic or 'protein' in searchable_content) and ('diet' in topic or 'diet' in searchable_content or 'nutrition' in topic or 'nutrition' in searchable_content):
             relevant_docs["protein diet"].append(idx)
 
@@ -1101,14 +1187,10 @@ def analyze_dataset_for_relevant_docs(df):
             for idx, row in df.iterrows():
                 if idx not in docs:  # Skip already included docs
                     topic = str(row['topic']).lower()
-                    # Check if any keyword appears in the topic
                     if any(keyword in topic for keyword in keywords):
                         candidates.append(idx)
             
-            # Add candidates to reach minimum of 5 documents
             relevant_docs[query].extend(candidates[:max(0, 5 - len(docs))])
-            
-            print(f"Added {max(0, 5 - len(docs))} documents to {query} category")
 
     return relevant_docs
 
@@ -1139,10 +1221,8 @@ def google_search(query, max_results=5):
 def main():
     apply_custom_css()
 
-    # Check if environment variables are properly set
-    env_vars_ok = check_environment_variables()
-    if not env_vars_ok:
-        st.stop()
+    # Log/notify about missing optional variables in the sidebar, but DO NOT block startup!
+    check_environment_variables()
         
     col1, col2, col3 = st.columns([1, 3, 1])
     with col2:
@@ -1575,7 +1655,6 @@ def main():
                                     context_docs.append(f"Title: {topic}\nSource: {source}\n{content_snippet}")
                     else:
                         # Fallback if index is not available
-                        # Get a mix of sources
                         for source_type in df['source'].unique():
                             source_df = df[df['source'] == source_type].head(2)
                             for i, row in source_df.iterrows():
@@ -1629,7 +1708,6 @@ def main():
                     f"\n\nUser question: {user_input}"
                 )
             else:
-                # Create improved prompt with explicit instruction to answer the user's query
                 prompt = (
                     "You are NutriQuest, the intelligent AI assistant of NutriQuest, a modern nutrition and fitness search engine. "
                     "Your purpose is to help users find clear, evidence-based, and actionable information about fitness, nutrition, and exercise. "
@@ -1644,34 +1722,28 @@ def main():
                     f"\n\nUser question: {user_input}"
                 )
                 
-            # API key for OpenRouter.ai - Use from environment variable
             api_key = OPENROUTER_API_KEY
             
-            # Debug options allow overriding the API key if needed
             if debug_mode and "custom_api_key" in locals() and custom_api_key:
                 api_key = custom_api_key
+                
+            if not api_key:
+                ai_reply = "⚠️ **API Key is missing:** To chat with NutriQuest AI, please add your OpenRouter.ai API Key in your `.env` file, or login as Admin using the password 'admin' and enter it in the sidebar settings."
+                st.session_state.chat_history.append({"role": "assistant", "content": ai_reply})
+                st.rerun()
             
-            # Ensure the API key is properly formatted
-            if not api_key.startswith("sk-"):
-                print("Warning: API key doesn't have the expected format (should start with 'sk-')")
-            
-            # Set up headers with proper authentication
             headers = {
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://nutriquest.streamlit.app",
                 "X-Title": "NutriQuest"
             }
             
-            # Add authorization header by default (always use)
             headers["Authorization"] = f"Bearer {api_key}"
             
-            # Determine the API URL based on authentication method
             api_url = api_url if debug_mode else "https://openrouter.ai/api/v1/chat/completions"
             
-            # Always use query parameter authentication too (this is what worked for the user)
             api_url = f"{api_url}?api_key={api_key}"
             
-            # Verify authentication settings
             if debug_mode:
                 auth_check = {
                     "using_auth_header": "Authorization" in headers,
@@ -1680,16 +1752,16 @@ def main():
                     "api_url": api_url.split("?")[0] + ("?..." if "?" in api_url else "")
                 }
                 st.code(f"Auth Check: {json.dumps(auth_check, indent=2)}", language="json")
-                print(f"Auth Check: {json.dumps(auth_check, indent=2)}")
             
+            selected_model = custom_model if (debug_mode and "custom_model" in locals() and custom_model) else st.session_state.default_model
             data = {
-                "model": selected_model if debug_mode else st.session_state.default_model,
+                "model": selected_model,
                 "messages": [
                     {"role": "system", "content": "You are NutriQuest, a friendly and concise fitness and nutrition assistant. Answer using only the provided reference documents. Respond in clear, friendly, natural language. Focus on being helpful and accurate."},
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.7,
-                "max_tokens": 2000  # Increased token limit for longer responses
+                "max_tokens": 2000
             }
             
             if debug_mode:
@@ -1697,7 +1769,6 @@ def main():
 
             try:
                 with st.spinner("Thinking..."):
-                    # Log the API request for debugging purposes
                     req_data = {
                         "url": api_url.split("?")[0] + ("?..." if "?" in api_url else ""),
                         "headers": {k: v if k != "Authorization" else "Bearer sk-****" for k, v in headers.items()},
@@ -1707,9 +1778,6 @@ def main():
                     
                     if debug_mode:
                         st.code(f"Request: {json.dumps(req_data, indent=2)}", language="json")
-                        print(f"API Request: {json.dumps(req_data, indent=2)}")
-                    
-                    print(f"Sending request to OpenRouter.ai API with model: {data['model']}")
                     
                     response = requests.post(api_url, headers=headers, json=data, timeout=60)
                     
@@ -1720,17 +1788,12 @@ def main():
                         if debug_mode:
                             response_json["raw_response"] = response.text
                     
-                    # Print response status for debugging
-                    print(f"API Response Status: {response.status_code}")
-                    
                     if debug_mode:
-                        # Display full response for debugging
                         resp_data = {
                             "status_code": response.status_code,
                             "response": response_json
                         }
                         st.code(f"Response: {json.dumps(resp_data, indent=2)}", language="json")
-                        print(f"API Response: {json.dumps(resp_data, indent=2)}")
                     
                     if response.status_code == 200:
                         if 'choices' in response_json and len(response_json['choices']) > 0:
@@ -1739,7 +1802,6 @@ def main():
                         else:
                             error_detail = json.dumps(response_json, indent=2)
                             error_msg = f"Unexpected API response format: {error_detail}"
-                            print(f"API Error - Unexpected response format: {error_detail}")
                             if debug_mode:
                                 ai_reply = f"**DEBUG - ERROR:** {error_msg}"
                             else:
@@ -1747,7 +1809,6 @@ def main():
                                 ai_reply = "I apologize, but I received an unexpected response format from the AI service. Please try again."
                     else:
                         error_msg = f"API Error (Status {response.status_code}): {response.text}"
-                        print(f"API Error - Status {response.status_code}: {response.text}")
                         if debug_mode:
                             ai_reply = f"**DEBUG - ERROR:** {error_msg}"
                         else:
@@ -1755,7 +1816,6 @@ def main():
                             ai_reply = "Sorry, there was an error contacting the AI API. Please try again later."
             except requests.exceptions.Timeout:
                 error_msg = "API Error - Request timeout after 60 seconds"
-                print(error_msg)
                 if debug_mode:
                     ai_reply = f"**DEBUG - ERROR:** {error_msg}"
                 else:
@@ -1763,7 +1823,6 @@ def main():
             except requests.exceptions.RequestException as e:
                 error_details = str(e)
                 error_msg = f"Request error: {error_details}"
-                print(f"API Error - Request exception: {error_details}")
                 if debug_mode:
                     ai_reply = f"**DEBUG - ERROR:** {error_msg}"
                 else:
@@ -1772,7 +1831,6 @@ def main():
             except Exception as e:
                 error_details = str(e)
                 error_msg = f"Unexpected error: {error_details}"
-                print(f"API Error - Unexpected exception: {error_details}")
                 if debug_mode:
                     ai_reply = f"**DEBUG - ERROR:** {error_msg}\n\n**Traceback:**\n```\n{traceback.format_exc()}\n```"
                 else:
@@ -1794,7 +1852,6 @@ def main():
 
         index, unique_terms, inverted_index = create_index(df)
 
-        # Store the index and related data in session state for use across the app
         st.session_state.search_index = index
         st.session_state.unique_terms = unique_terms
         st.session_state.inverted_index = inverted_index
@@ -1804,7 +1861,15 @@ def main():
         st.sidebar.markdown("## Search Options")
 
         use_query_expansion = st.sidebar.checkbox("Use query expansion", value=True)
-        use_bert = st.sidebar.checkbox("Use BERT re-ranking", value=False)
+        
+        # BERT Checkbox with package availability validation
+        if BERT_AVAILABLE:
+            use_bert = st.sidebar.checkbox("Use BERT re-ranking", value=False)
+        else:
+            st.sidebar.checkbox("Use BERT re-ranking", value=False, disabled=True, help=BERT_ERROR)
+            st.sidebar.warning(f"⚠️ BERT Re-ranking disabled: {BERT_ERROR}")
+            use_bert = False
+            
         num_results = st.sidebar.slider("Number of results:", min_value=5, max_value=20, value=10)
 
         st.sidebar.markdown("## Source Filter")
