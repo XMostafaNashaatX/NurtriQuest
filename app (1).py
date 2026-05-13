@@ -1070,6 +1070,7 @@ def search_and_evaluate(index, query, df, unique_terms, inverted_index, relevant
     }
 
     if relevant_docs:
+        eval_metrics = {}
         relevant_set = set(int(doc) for doc in relevant_docs)
         total_relevant = len(relevant_set)
 
@@ -1185,7 +1186,8 @@ def analyze_dataset_for_relevant_docs(df):
     relevant_docs = {
         "protein diet": [],
         "muscle building": [],
-        "weight loss": []
+        "weight loss": [],
+        "best protein source for muscle growth and fat loss with nutrition plan": []
     }
 
     for idx, row in df.iterrows():
@@ -1210,6 +1212,9 @@ def analyze_dataset_for_relevant_docs(df):
 
         if ('weight' in topic or 'weight' in searchable_content) and ('loss' in topic or 'loss' in searchable_content or 'fat' in topic or 'fat' in searchable_content):
             relevant_docs["weight loss"].append(idx)
+
+        if ('protein' in topic or 'protein' in searchable_content) and ('muscle' in topic or 'muscle' in searchable_content) and ('fat' in topic or 'fat' in searchable_content or 'loss' in topic or 'loss' in searchable_content):
+            relevant_docs["best protein source for muscle growth and fat loss with nutrition plan"].append(idx)
 
     # Ensure minimum number of documents per category
     for query, docs in relevant_docs.items():
@@ -1932,7 +1937,7 @@ def main():
 
         if not (search_button and query):
             st.markdown("<h3>Popular Topics</h3>", unsafe_allow_html=True)
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 if st.button("Protein Diet", use_container_width=True):
                     query = "protein diet"
@@ -1944,6 +1949,10 @@ def main():
             with col3:
                 if st.button("Weight Loss", use_container_width=True):
                     query = "weight loss"
+                    search_button = True
+            with col4:
+                if st.button("Advanced Plan", use_container_width=True):
+                    query = "best protein source for muscle growth and fat loss with nutrition plan"
                     search_button = True
 
         if search_button and query:
