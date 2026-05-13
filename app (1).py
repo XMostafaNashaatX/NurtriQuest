@@ -1915,6 +1915,12 @@ def main():
 
         if search_button and query:
             try:
+                # Check if the query is a predefined test query to show the live evaluation dashboard
+                test_query_key = query.lower().strip()
+                if test_query_key in test_queries:
+                    relevant_docs_list = test_queries[test_query_key]
+                    search_and_evaluate(index, query, df, unique_terms, inverted_index, relevant_docs_list)
+                    
                 google_results = []
                 if "Google" in selected_sources:
                     google_results = google_search(query, max_results=num_results)
